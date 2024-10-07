@@ -3,8 +3,7 @@
 This repository is an early beta implementation of liquid restaking protocol. The codebase is designed to be general with tests over all major functionalities. However, due to the limited available restaking protocol in solana, this repo uses Solayer EndoAvs as the example in part of the tests.
 
 ## Disclaimer
-
-This repository is NOT audited and should be treated as reference only. You are expected to read the code and make proper changes for your production usage.
+This repository contains unaudited smart contract code. The code is provided “as-is” and has not undergone a formal security audit. Use this code at your own risk.
 
 ## Installation
 
