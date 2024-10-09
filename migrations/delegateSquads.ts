@@ -1,8 +1,12 @@
+// This repo outputs the bs58 serialized instruction for delegation,
+// Its meant to be used with Squads where you can create a transaction proposal.
+
 import * as anchor from "@coral-xyz/anchor";
 import { PublicKey, LAMPORTS_PER_SOL, SystemProgram, Connection, Transaction } from "@solana/web3.js";
 import { getAssociatedTokenAddressSync, createAssociatedTokenAccountIdempotentInstruction, TOKEN_PROGRAM_ID, ASSOCIATED_TOKEN_PROGRAM_ID } from "@solana/spl-token";
 import { delegate, DelegateArgs, DelegateAccounts } from "../sdk/generated/instructions";
 import bs58 from "bs58";
+
 
 const main = async () => {
     const connection = new Connection(process.env.SOLANA_MAINNET!);
@@ -71,6 +75,7 @@ const main = async () => {
         feePayer: accounts.delegateAuthority,
     }).add(createAccountIx, delegateIx);
 
+    console.log("bs58 encoded instruction: ");
     console.log(bs58.encode(tx.compileMessage().serialize()))
 }
 
