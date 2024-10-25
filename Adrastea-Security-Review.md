@@ -75,14 +75,15 @@ The following smart contracts were in the scope of the security review:
 
 The following number of issues have been identified, sorted by their severity:
 
-- **Critical and High** issues: 2
+- **Critical and High** issues: 0
+- **Medium** issues: 2
 - **Low** issues: 3
 - **Info** issues: 1
 
 | **ID** | **Title**                                                                     | **Severity** | **Status** |
 | :----: | ----------------------------------------------------------------------------- | :----------: | :--------: |
-| [C-01] | Arbitrary Input Tokens and Token Extensions Leading to Invariant Manipulation |   Critical   |    N/A     |
-| [H-01] | Risk of Input Token Mint with Freeze Authority Leading to Permanent DoS       |     High     |    N/A     |
+| [M-01] | Arbitrary Input Tokens and Token Extensions Leading to Invariant Manipulation |    Medium    |    N/A     |
+| [M-02] | Risk of Input Token Mint with Freeze Authority Leading to Permanent DoS       |    Medium    |    N/A     |
 | [L-01] | Require New Authority as Co-Signer for Authority Transmission                 |     Low      |    N/A     |
 | [L-02] | Insufficient Account Size Checks and Lack of Reallocation Support             |     Low      |    N/A     |
 | [L-03] | Missing Event Emissions for State-Changing Functions                          |     Low      |    N/A     |
@@ -90,14 +91,13 @@ The following number of issues have been identified, sorted by their severity:
 
 # 7. Findings
 
-# [C-01] Arbitrary Input Tokens and Token Extensions Leading to Invariant Manipulation
+# [M-01] Arbitrary Input Tokens and Token Extensions Leading to Invariant Manipulation
 
 ## Severity
 
-Critical Risk
+Medium Risk
 
 ## Description
-
 The current implementation allows arbitrary input tokens with different extensions, which can lead to manipulation of critical invariants such as `input_decimals == output_decimals`. Specifically, allowing the `closeMint` extension poses a risk as it permits the initializer to modify the mint’s decimal value after creation, breaking important assumptions about token behavior.
 
 For instance, the initializer controls the mint’s decimal value, which could be changed after registration. This disrupts the invariant that `input_decimals == output_decimals`, crucial for operations like deposits and withdrawals based on a 1:1 ratio. Furthermore, other token extensions, such as the `transfer fee` extension, can also be harmful to the protocol.
@@ -126,32 +126,194 @@ pub fn calculate_input_token_amount(&self, amount: u64) -> u64 {
 This invariant is broken if the decimal values of the tokens differ, which could result in an imbalance such as 1:100 or another unintended ratio.
 
 ## Impact
-
-Allowing arbitrary token extensions, especially the `closeMint` extension, can lead to a mismatch between input and output token decimals, which directly affects the protocol’s operations. The most significant impact is **loss of user funds**, as users could end up trading tokens at ratios like 1:100 instead of the expected 1:1 due to differences in token decimal values.
+Allowing arbitrary token extensions, especially the `closeMint` extension, can lead to a mismatch between input and output token decimals, which directly affects the protocol’s operations. put the program in manipulated state, and still have serious impact here which will be permanent DOS due to the fact that the deposit function will not work with mismatched decimals.
 
 Additionally, extensions such as the `transfer fee` extension can further degrade the protocol’s security, leading to unpredictable fees and impacting the fairness and integrity of token exchanges.
 
-## Recommendations
+## Proof of Concept
 
+The following tests demonstrate how to simulate this attack:
+
+```rs
+#[cfg(test)]
+mod tests {
+    use solana_program::pubkey::Pubkey;
+    use solana_program_test::*;
+    use solana_sdk::{
+        signature::{Keypair, Signer},
+        transaction::Transaction,
+        system_instruction,
+    };
+    use spl_token_2022::{
+        instruction::{initialize_mint2, close_account, set_authority, initialize_mint_close_authority},
+        extension::ExtensionType,
+        state::Mint,
+    };
+    use solana_program::program_pack::Pack; // Import the Pack trait for Mint::LEN
+
+    async fn create_mint(
+        banks_client: &mut BanksClient,
+        payer: &Keypair,
+        mint_keypair: &Keypair,
+        mint_authority: &Keypair,
+        freeze_authority: Option<&Pubkey>,
+        decimals: u8,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        // Calculate the space required using the ExtensionType
+        let space = ExtensionType::try_calculate_account_len::<Mint>(&[ExtensionType::MintCloseAuthority]).unwrap();
+        // Use Mint::LEN from the Pack trait
+        let mint_account_rent = banks_client
+            .get_rent()
+            .await?
+            .minimum_balance(space);
+    
+        let recent_blockhash = banks_client.get_latest_blockhash().await?;
+    
+        // Step 1: Create the account for the mint with the required size and rent-exempt balance
+        let create_account_tx = Transaction::new_signed_with_payer(
+            &[system_instruction::create_account(
+                &payer.pubkey(),
+                &mint_keypair.pubkey(),
+                mint_account_rent,
+                space as u64,
+                &spl_token_2022::id(),
+            )],
+            Some(&payer.pubkey()),
+            &[payer, mint_keypair],
+            recent_blockhash,
+        );
+    
+        banks_client.process_transaction(create_account_tx).await?;
+    
+        // Step 2: Initialize the mint with initialize_mint2
+        let recent_blockhash = banks_client.get_latest_blockhash().await?;
+        let initialize_mint_tx = Transaction::new_signed_with_payer(
+            &[
+                initialize_mint_close_authority(
+                    &spl_token_2022::id(),
+                    &mint_keypair.pubkey(),
+                    Some(&mint_authority.pubkey()),
+                )?,
+                initialize_mint2(
+                    &spl_token_2022::id(),
+                    &mint_keypair.pubkey(),
+                    &mint_authority.pubkey(),
+                    freeze_authority,
+                    decimals,
+                )?
+            ],
+            Some(&payer.pubkey()),
+            &[payer],
+            recent_blockhash,
+        );
+    
+        banks_client.process_transaction(initialize_mint_tx).await?;
+        Ok(())
+    }
+
+    async fn close_mint_account(
+        banks_client: &mut BanksClient,
+        payer: &Keypair,
+        mint_keypair: &Keypair,
+        receiver: &Pubkey,
+        mint_authority: &Keypair,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let recent_blockhash = banks_client.get_latest_blockhash().await?;
+        let tx = Transaction::new_signed_with_payer(
+            &[close_account(
+                &spl_token_2022::id(),
+                &mint_keypair.pubkey(),
+                receiver,
+                &mint_authority.pubkey(),
+                &[&mint_authority.pubkey()],
+            )?],
+            Some(&payer.pubkey()),
+            &[payer, mint_authority],
+            recent_blockhash,
+        );
+        banks_client.process_transaction(tx).await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_initialize_mint_and_close() {
+        // Register the spl_token_2022 program processor
+        let program_test = ProgramTest::new(
+            "spl_token_2022", 
+            spl_token_2022::id(), 
+            processor!(spl_token_2022::processor::Processor::process)
+        );
+    
+        // Start the test environment
+        let (mut banks_client, payer, _recent_blockhash) = program_test.start().await;
+    
+        // Create keypairs for the mint and the mint authority
+        let mint_keypair = Keypair::new();
+        let mint_authority = Keypair::new();
+        let receiver_account = Keypair::new(); // Account that will receive the remaining rent
+    
+        // Step 1: Initialize the mint using spl_token_2022
+        create_mint(
+            &mut banks_client,
+            &payer,
+            &mint_keypair,
+            &mint_authority, // Correctly use the public key of mint_authority
+            Some(&mint_authority.pubkey()), // Freeze authority
+            0, // Token decimals
+        )
+        .await
+        .unwrap();
+    
+        // // Fetch and print the current decimals value
+        // let mint_data = get_mint_data(&mut banks_client, &mint_keypair.pubkey()).await.unwrap();
+        // println!("Old Mint Decimals: {}", mint_data.decimals);
+
+
+        // Step 2: Close the mint account
+        close_mint_account(
+            &mut banks_client,
+            &payer,
+            &mint_keypair,
+            &receiver_account.pubkey(), // Receiver of the rent remains
+            &mint_authority, // Correct mint authority keypair is used here
+        )
+        .await
+        .unwrap();
+
+        // Step 3: re-initialize the mint account with different decimal
+
+        create_mint(
+            &mut banks_client,
+            &payer,
+            &mint_keypair,
+            &mint_authority, // Correctly use the public key of mint_authority
+            Some(&mint_authority.pubkey()), // Freeze authority
+            6, // Token decimals
+        )
+        .await
+        .unwrap();
+    }
+}
+```
+
+## Recommendations
 To mitigate these risks, consider the following approaches:
 
 1. **Hard Code the Token Program to SPL Token Program**:
    Ensure that the token program used is restricted to the SPL token program (`spl-token-2022` or `spl-token`), preventing the use of arbitrary tokens with potentially harmful extensions.
 
 2. **Filter Allowed Extensions**:
-   If the protocol requires support with extensions, implement a filtering mechanism to allow only safe extensions while rejecting dangerous ones such as `closeMint` and `transfer fee`. Specifically, enforce strict checks on the token's properties to maintain the `input_decimals == output_decimals` invariant.
+   If the protocol requires support with extensions, implement a filtering mechanism to allow only safe extensions while rejecting dangerous ones such as `closeMint` and `transfer fee`. Specifically, strict checks on the token's properties should be enforced to maintain the `input_decimals == output_decimals` invariant.
 
 Implementing these controls will safeguard the protocol from vulnerabilities associated with token extension manipulation and ensure that users' funds are not subject to unexpected losses.
 
-## Team Response
-
-N/A
-
-# [H-01] Risk of Input Token Mint with Freeze Authority Leading to Permanent DoS
+## Team Response {#m-01-team-response}
+For the official pools managed and supported by the Adrastea Team, all input mint tokens used in each pool will undergo a comprehensive review process to mitigate the risk of any malicious behavior. This process will involve examining the token program utilized, the enabled extensions, freeze/mint authorities, and the overall trustworthiness of the token. Only the official pools will be displayed on our website, and the addresses of these official pools along with the related token mints will be provided in our documentation. We strongly recommend that users interact exclusively with the official pools.
+# [M-02] Risk of Input Token Mint with Freeze Authority Leading to Permanent DoS
 
 ## Severity
 
-High Risk
+Medium Risk
 
 ## Description
 
@@ -198,7 +360,7 @@ The pool relies on the assumption that the input token mint is safe, but if the 
 
 ## Team Response
 
-N/A
+See response for [M-01](#m-01-team-response).
 
 # [L-01] Require New Authority as Co-Signer for Authority Transmission
 
@@ -251,9 +413,9 @@ To prevent accidental transfers and loss of control, introduce the following imp
 
 2. **Implement a Two-Step Transfer Process**: Split the admin transfer into two steps: first, initiating the transfer and, second, confirming the transfer by the new authority.
 
-## Team Response
+## Team Response {#l-01-team-response}
 
-N/A
+We agree that implementing this feature would significantly improve the operation and management of the contracts. We will consider its inclusion in a future iteration.
 
 # [L-02] Insufficient Account Size Checks and Lack of Reallocation Support
 
@@ -293,7 +455,7 @@ pub struct LRTPool {
 
 ## Team Response
 
-N/A
+See response for [L-01](#l-01-team-response).
 
 # [L-03] Missing Event Emissions for State-Changing Functions
 
@@ -354,7 +516,7 @@ pub fn deposit(ctx: Context<Deposit>, amount: u64) -> Result<()> {
 
 ## Team Response
 
-N/A
+See response for [L-01](#l-01-team-response).
 
 # [I-01] Add Pauser Role to Pool Struct for Emergency Pausing
 
@@ -420,4 +582,4 @@ This addition provides a safeguard to prevent malicious actions from causing fur
 
 ## Team Response
 
-N/A
+See response for [L-01](#l-01-team-response).
