@@ -98,37 +98,30 @@ The following number of issues have been identified, sorted by their severity:
 Medium Risk
 
 ## Description
-The current implementation allows arbitrary input tokens with different extensions, which can lead to manipulation of critical invariants such as `input_decimals == output_decimals`. Specifically, allowing the `closeMint` extension poses a risk as it permits the initializer to modify the mint’s decimal value after creation, breaking important assumptions about token behavior.
+The current implementation allows the input token mint to have a freeze authority, which can result in a potential denial of service (DoS) attack on the pool. If the input token mint’s freeze authority exercises control, the pool’s input token vault can be frozen, leading to a **permanent loss of funds** for users. This is a critical issue, as frozen token accounts cannot transfer tokens, rendering the pool inoperable.
 
-For instance, the initializer controls the mint’s decimal value, which could be changed after registration. This disrupts the invariant that `input_decimals == output_decimals`, crucial for operations like deposits and withdrawals based on a 1:1 ratio. Furthermore, other token extensions, such as the `transfer fee` extension, can also be harmful to the protocol.
-
-The current implementation shows an attempt to check the mint's decimal value:
+Here’s the relevant code:
 
 ```rust
 #[account(
-    mint::decimals = input_token_mint.decimals,
-    mint::authority = pool,
-    mint::freeze_authority = pool,
     mint::token_program = token_program,
-    constraint = output_token_mint.supply == 0 @ LRTPoolError::NonZeroRstMintSupply
 )]
-output_token_mint: Box<InterfaceAccount<'info, Mint>>,
+input_token_mint: Box<InterfaceAccount<'info, Mint>>,
+
+#[account(
+    mut,
+    associated_token::authority = pool,
+    associated_token::mint = input_token_mint,
+    associated_token::token_program = token_program
+)]
+pool_input_token_vault: Box<InterfaceAccount<'info, TokenAccount>>,
 ```
 
-However, this does not fully protect against the possibility of manipulating the token's decimal value via the `closeMint` extension or similar risky extensions, leaving the protocol vulnerable. The following function relies on the assumption of matching decimals:
-
-```rust
-pub fn calculate_input_token_amount(&self, amount: u64) -> u64 {
-    amount
-}
-```
-
-This invariant is broken if the decimal values of the tokens differ, which could result in an imbalance such as 1:100 or another unintended ratio.
+The pool relies on the assumption that the input token mint is safe, but if the input token mint has a freeze authority, that authority can freeze the pool's input token vault. This could prevent further deposits, withdrawals, or transfers, effectively freezing user funds.
 
 ## Impact
-Allowing arbitrary token extensions, especially the `closeMint` extension, can lead to a mismatch between input and output token decimals, which directly affects the protocol’s operations. put the program in manipulated state, and still have serious impact here which will be permanent DOS due to the fact that the deposit function will not work with mismatched decimals.
-
-Additionally, extensions such as the `transfer fee` extension can further degrade the protocol’s security, leading to unpredictable fees and impacting the fairness and integrity of token exchanges.
+- **Denial of Service (DoS)**: The pool’s input token vault can be frozen by the mint’s freeze authority, halting all operations that involve this vault.
+- **Permanent Loss of Funds**: If the vault is frozen, users will not be able to withdraw their funds, leading to a potential permanent loss of funds if the freeze is never lifted.
 
 ## Proof of Concept
 
@@ -297,18 +290,26 @@ mod tests {
 ```
 
 ## Recommendations
-To mitigate these risks, consider the following approaches:
+1. **Validate Absence of Freeze Authority**:
+   Ensure that the input token mint does not have a freeze authority or that the pool controls the freeze authority, preventing any external actor from freezing the pool's input token vault.
 
-1. **Hard Code the Token Program to SPL Token Program**:
-   Ensure that the token program used is restricted to the SPL token program (`spl-token-2022` or `spl-token`), preventing the use of arbitrary tokens with potentially harmful extensions.
+   Example:
 
-2. **Filter Allowed Extensions**:
-   If the protocol requires support with extensions, implement a filtering mechanism to allow only safe extensions while rejecting dangerous ones such as `closeMint` and `transfer fee`. Specifically, strict checks on the token's properties should be enforced to maintain the `input_decimals == output_decimals` invariant.
+   ```rust
+   #[account(
+       mint::freeze_authority = COption::None, // Ensure no freeze authority exists
+       mint::token_program = token_program,
+   )]
+   input_token_mint: Box<InterfaceAccount<'info, Mint>>,
+   ```
 
-Implementing these controls will safeguard the protocol from vulnerabilities associated with token extension manipulation and ensure that users' funds are not subject to unexpected losses.
+2. **Display Warnings for Tokens with `freeze_authority`:** If supporting tokens with a `freeze_authority` is necessary, display a warning to users in the UI, informing them of the risks associated with trading or interacting with these tokens.
+
+3. **Implement Allowlist for Trusted Tokens:** For regulated stablecoins like USDC, which have a `freeze_authority` for security reasons, implement an allowlist for trusted tokens while applying strict checks on other tokens. This ensures the protocol can support widely-used tokens while minimizing risk.
 
 ## Team Response {#m-01-team-response}
-For the official pools managed and supported by the Adrastea Team, all input mint tokens used in each pool will undergo a comprehensive review process to mitigate the risk of any malicious behavior. This process will involve examining the token program utilized, the enabled extensions, freeze/mint authorities, and the overall trustworthiness of the token. Only the official pools will be displayed on our website, and the addresses of these official pools along with the related token mints will be provided in our documentation. We strongly recommend that users interact exclusively with the official pools.
+For the official pools managed and supported by the Adrastea Team, all input mint tokens used in each pool need to be compatible with Solayer's endoAVS to be considered, then they will undergo a comprehensive review process to mitigate the risk of any malicious behavior. This process will involve examining the token program utilized, the enabled extensions, freeze/mint authorities, and the overall trustworthiness of the token. Only the official pools will be displayed on our website, and the addresses of these official pools along with the related token mints will be provided in our documentation. We strongly recommend that users interact exclusively with the official pools.
+
 # [M-02] Risk of Input Token Mint with Freeze Authority Leading to Permanent DoS
 
 ## Severity
@@ -361,6 +362,7 @@ The pool relies on the assumption that the input token mint is safe, but if the 
 ## Team Response
 
 See response for [M-01](#m-01-team-response).
+
 
 # [L-01] Require New Authority as Co-Signer for Authority Transmission
 
