@@ -1,9 +1,7 @@
 # Adra LRT
 
-This repository is an early beta implementation of liquid restaking protocol. The codebase is designed to be general with tests over all major functionalities. However, due to the limited available restaking protocol in solana, this repo uses Solayer EndoAvs as the example in part of the tests.
+This repository is an implementation of liquid restaking protocol. The codebase is designed to be general with tests over all major functionalities. However, due to the limited available restaking protocol in solana, this repo uses Solayer EndoAvs as the example in part of the tests.
 
-## Disclaimer
-This repository contains unaudited smart contract code. The code is provided “as-is” and has not undergone a formal security audit. Use this code at your own risk.
 
 ## Installation
 
